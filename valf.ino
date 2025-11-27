@@ -1,26 +1,48 @@
 #define COOLING_PIN 2
 #define HEATING_PIN 3
-#define NTC_PIN A7
+#define BULB_TEMPERATURE_PIN A6
+#define EVAPORATOR_TEMPERATURE_PIN A5
+#define PRESSURE_TRANSMITTER_PIN A4
 
-const float seriesResistor = 10000;
-const float nominalResistance = 4700;
-const float nominalTemperature = 25;
+const float seriesResistor = 9900;
+const float nominalResistance = 10000;
+const float nominalTemperature = 18;
 const float bCoefficient = 3950;
 const int adcMax = 1023;
 const float supplyVoltage = 5.0;
+const float temperatureConfigurationCorrectionCoefficientForBulb = 3.0;
+const float temperatureConfigurationCorrectionCoefficientForEvaporator = 3.0;
 
+unsigned long previousPrintTime = 0;
+const long printInterval = 100; 
+
+unsigned long previousControlTime = 0;
+const long controlInterval = 300; 
 
 void setup() {
   Serial.begin(115200);
-  pinMode(COOLING_PIN,OUTPUT);
-  pinMode(HEATING_PIN,OUTPUT);
+  pinMode(COOLING_PIN, OUTPUT);
+  pinMode(HEATING_PIN, OUTPUT);
 }
 
 String incomingData = "";
-float presentTemperature = 0.0;
-float presentPressure = 0.0;
+float presentEvaporatorTemperature = 0.0;
+float presentEvaporatorPressure = 0.0;
 
 void loop() {
+  readSerialDataNonBlocking();
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousControlTime >= controlInterval) {
+    previousControlTime = currentMillis;
+    controlExpansionValveHeatingOrCoolingProcess(presentEvaporatorTemperature, presentEvaporatorPressure);
+  }
+  if (currentMillis - previousPrintTime >= printInterval) {
+    previousPrintTime = currentMillis;
+    printExpansionValveBulbTemperature();
+  }
+}
+
+void readSerialDataNonBlocking() {
   while (Serial.available()) {
     char c = Serial.read();
     if (c == '\n') {
@@ -30,9 +52,6 @@ void loop() {
       incomingData += c;
     }
   }
-  controlExpansionValveHeatingOrCoolingProcess(presentTemperature,presentPressure);
-  //getEnvironmentTemperature();
-  delay(1000);
 }
 
 float calculateSaturationTemperature(float temperature, float pressureAsKiloPascal){
@@ -48,20 +67,23 @@ float calculateSaturationTemperature(float temperature, float pressureAsKiloPasc
   Serial.print(saturationTemperature);
   return saturationTemperature;
 }
+
 float getTargetTemperature(float saturationTemperature){
-  return saturationTemperature+10;
+  return saturationTemperature + 10;
 }
+
 void controlExpansionValveHeatingOrCoolingProcess(float presentEvaporatorTemperature, float presentEvaporatorPressureAsKiloPascal){
-  float dT = 5;
-  float saturationTemperature = calculateSaturationTemperature(presentEvaporatorTemperature,presentEvaporatorPressureAsKiloPascal);
+  float dT = 5; 
+  float saturationTemperature = calculateSaturationTemperature(presentEvaporatorTemperature, presentEvaporatorPressureAsKiloPascal);
   float targetTemperature = getTargetTemperature(saturationTemperature);
-  if(presentEvaporatorTemperature > targetTemperature+dT){
+  
+  if(presentEvaporatorTemperature > targetTemperature + dT){
     makeHeatingProcess();
   }
-  else if((targetTemperature + dT > presentEvaporatorTemperature) &&  (presentEvaporatorTemperature>targetTemperature)){
+  else if((targetTemperature + dT >= presentEvaporatorTemperature) && (presentEvaporatorTemperature > targetTemperature)){
     noHeatingCoolingProcess();
   }
-  else if(presentEvaporatorTemperature<targetTemperature){
+  else if(presentEvaporatorTemperature <= targetTemperature){
     makeCoolingProcess();
   }
 }
@@ -71,50 +93,90 @@ void parseData(String data) {
   if (separatorIndex != -1) {
     String tempStr = data.substring(0, separatorIndex);
     String pressStr = data.substring(separatorIndex + 1);
-    presentTemperature = tempStr.toFloat();
-    presentPressure = pressStr.toFloat();
+    presentEvaporatorTemperature = tempStr.toFloat();
+    presentEvaporatorPressure = pressStr.toFloat();
     Serial.println();
     Serial.println("---------------------------------------------------");
     Serial.print("Evaparatör Sıcaklık: ");
-    Serial.print(presentTemperature);
+    Serial.print(presentEvaporatorTemperature);
     Serial.print(" Evaparatör Basınç: ");
-    Serial.print(presentPressure);
+    Serial.print(presentEvaporatorPressure);
   }
 }
 
 void makeCoolingProcess(){
-  digitalWrite(HEATING_PIN,HIGH);
+  digitalWrite(HEATING_PIN, HIGH); 
   Serial.println();
   Serial.print("Soğutma işlemi yapılıyor");
-  digitalWrite(COOLING_PIN,LOW);
+  digitalWrite(COOLING_PIN, LOW); 
 }
+
 void makeHeatingProcess(){
-  digitalWrite(COOLING_PIN,HIGH);
+  digitalWrite(COOLING_PIN, HIGH); 
   Serial.println();
   Serial.print("Isıtma işlemi yapılıyor");
-  digitalWrite(HEATING_PIN,LOW);
+  digitalWrite(HEATING_PIN, LOW); 
 }
+
 void noHeatingCoolingProcess(){
-  digitalWrite(COOLING_PIN,HIGH);
-  digitalWrite(HEATING_PIN,HIGH);
+  digitalWrite(COOLING_PIN, HIGH); 
+  digitalWrite(HEATING_PIN, HIGH); 
   Serial.println();
   Serial.print("Hedef sıcaklık içinde bir işlem yok");
 }
 
-void getEnvironmentTemperature(){
-  int adcValue = analogRead(NTC_PIN);
+float getExpansionValveBulbTemperature(){
+  int adcValue = (analogRead(BULB_TEMPERATURE_PIN) - adcMax) * -1; 
   float voltage = adcValue * (supplyVoltage / adcMax);
   float resistance = (supplyVoltage * seriesResistor / voltage) - seriesResistor;
-  float steinhart;
-  steinhart = resistance / nominalResistance;     
-  steinhart = log(steinhart);                     
-  steinhart /= bCoefficient;                      
-  steinhart += 1.0 / (nominalTemperature + 273.15);
-  steinhart = 1.0 / steinhart;                    
-  steinhart -= 273.15;                            
-  Serial.println();
-  Serial.print("Gerçek Ortam Sıcaklığı: ");
-  Serial.print(steinhart);
-  Serial.println(" °C");
+  float calculatingValue;
+  float temperature;
+  calculatingValue = resistance / nominalResistance;
+  calculatingValue = log(calculatingValue);
+  calculatingValue /= bCoefficient;
+  calculatingValue += 1.0 / (nominalTemperature + 273.15); 
+  calculatingValue = 1.0 / calculatingValue;
+  calculatingValue -= 273.15; 
+  temperature = calculatingValue + temperatureConfigurationCorrectionCoefficientForBulb;
+  return temperature;
+}
 
+float getEvaporatorTemperature(){
+  int adcValue = (analogRead(EVAPORATOR_TEMPERATURE_PIN) - adcMax) * -1; 
+  float voltage = adcValue * (supplyVoltage / adcMax);
+  float resistance = (supplyVoltage * seriesResistor / voltage) - seriesResistor;
+  float calculatingValue;
+  float temperature;
+  calculatingValue = resistance / nominalResistance;
+  calculatingValue = log(calculatingValue);
+  calculatingValue /= bCoefficient;
+  calculatingValue += 1.0 / (nominalTemperature + 273.15);
+  calculatingValue = 1.0 / calculatingValue;
+  calculatingValue -= 273.15;
+  temperature = calculatingValue + temperatureConfigurationCorrectionCoefficientForEvaporator;
+  return temperature;
+}
+
+float getEvaporatorPressure(){
+  const float vMin = 1.0; 
+  const float vMax = 5.0; 
+  const float pressureMaxKPa = 1000.0;
+  int adcValue = analogRead(PRESSURE_TRANSMITTER_PIN);
+  float voltage = (adcValue * supplyVoltage) / adcMax;
+  if (voltage < vMin){
+    voltage = vMin;
+  } 
+  else if (voltage > vMax) {
+    voltage = vMax;
+  }
+  float pressureKPa = (voltage - vMin) * (pressureMaxKPa / (vMax - vMin));
+  return pressureKPa;
+}
+
+void printExpansionValveBulbTemperature(){
+  float temperature = getExpansionValveBulbTemperature();
+  Serial.println();
+  Serial.print("Duyarga Sıcaklığı: ");
+  Serial.print(temperature);
+  Serial.println(" °C");
 }
